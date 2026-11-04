@@ -1,152 +1,121 @@
-# Machine Learning Project Template
+# Will Your Kickstarter Get Funded?
 
-A starting point for your team machine learning project. The repository ships an example notebook that trains a simple model with minimal cleaning and feature selection. Use it as scaffolding, then build your own project on top of it.
+A machine learning project that predicts, **at launch time**, whether a Kickstarter campaign will reach its funding goal. It uses only information a creator knows before the campaign starts: the funding goal, category, country, campaign duration, launch date and time, and the length of the project name.
 
-The example uses the [coffee quality dataset](https://github.com/jldbc/coffee-quality-database).
+Kickstarter is all-or-nothing: if a project misses its goal by the deadline, the creator receives nothing. A model that flags a campaign's chances before launch helps creators set realistic goals and helps the platform spot promising projects early.
 
-## Learning Objectives
+## Results at a Glance
 
-By the end of this repository, you should be able to:
+| | Baseline (always "fail") | **Final model (Gradient Boosting)** |
+|---|---|---|
+| F1 (successful class) | 0.00 | **0.62** |
+| ROC AUC | 0.50 | **0.76** |
+| Accuracy | 0.64 | **0.68** |
+| Precision / Recall | – | **0.55 / 0.71** |
 
-- Work on a data science project as a team, sharing the work across the data science lifecycle.
-- Frame a business problem as a machine learning task and choose a performance metric that fits the value you want to create.
-- Build a baseline model, then iterate with error analysis and at least three algorithms (including cross validation and hyperparameter tuning).
-- Communicate your findings and recommendations to a non-technical audience in a short presentation.
+Scores are on a held-out test set of 73,315 projects that the model never saw during training or tuning. Training and test scores differ by only about 0.01, so the model generalises well and does not overfit.
 
-## Learning Path
+**What drives success** (permutation importance, drop in ROC AUC):
 
-Your project follows the data science lifecycle:
+1. **Funding goal**: by far the strongest signal. Lower goals succeed much more often.
+2. **Category**: games, comics and theatre succeed far more often than technology or food.
+3. **Campaign duration** and **launch year** come next.
+4. Name length and launch hour have a small effect; country, weekday, month and day barely matter.
+
+In practice, what a creator decides about the goal and the type of project matters far more than exactly when the campaign launches.
+
+## Project Workflow
 
 ```mermaid
 flowchart LR
-    A[Data] --> B[EDA]
-    B --> C[Baseline model]
-    C --> D[Error analysis and iteration]
-    D --> E[Stakeholder presentation]
+    A[Raw data<br/>378,661 projects] --> B[EDA, cleaning and<br/>feature engineering]
+    B --> C[Clean dataset<br/>366,690 projects]
+    C --> D[Baseline + 3 models]
+    D --> E[Hyperparameter tuning]
+    E --> F[Test evaluation and<br/>feature importance]
+    F --> G[Presentation]
 ```
 
-Start with the assignment, set up your board, then use the example notebook as a reference:
+### 1. Data
+
+The [Kickstarter Projects dataset](https://www.kaggle.com/datasets/kemical/kickstarter-projects) (`ks-projects-201801.csv`) with 378,661 projects. The 2016 file is an older snapshot of the same projects and is used only for a comparison check.
+
+### 2. EDA, Cleaning and Preprocessing ([notebook](kickstarter_eda_preprocessing.ipynb))
+
+Every decision in this notebook is backed by a check or a quick model. The main steps:
+
+- **Target:** `successful` → 1, `failed` → 0. Live and undefined projects are removed, suspended projects are dropped, and canceled projects are analysed separately and split into three groups. Successful projects make up about 36% of the data, so the classes are imbalanced.
+- **Data leakage:** columns that are only known after the campaign ends (`pledged`, `backers`, `usd pledged`, `usd_pledged_real`) are removed, together with IDs and redundant columns (`currency` is fully explained by `country`, `main_category` by `category`).
+- **Joke and test projects** are flagged and the clear cases are removed.
+- **Re-posts and relaunches:** a project posted again within 7 days is treated as a re-post and only the last posting is kept. Later relaunches are kept but linked through a `split_group` ID, so related projects never end up in both training and test data.
+- **Feature engineering:**
+  - `log10_goal_usd`: the goal in USD on a log scale.
+  - `goal_vs_category`: the goal compared with the typical goal in its category (0 = typical, +1 = ten times higher).
+  - `duration_days`: campaign length.
+  - `name_length`: length of the project name (without the "(Canceled)" / "(Suspended)" labels).
+  - Launch `year`, `month`, `day`, `weekday` and `hour`.
+  - Rare countries and categories (below 0.5% of rows) grouped into "Other".
+- **Output:** [`data/kickstarter_final.csv`](data/kickstarter_final.csv), 366,690 projects ready for modelling.
+
+### 3. Modelling ([notebook](04_Training_the_models_final.ipynb))
+
+- **Metric:** F1 score of the successful class. Accuracy is misleading here, because always predicting "fail" already reaches 64%.
+- **Split:** 68% training, 12% validation and 20% test, using `GroupShuffleSplit` on `split_group` to keep relaunches of the same project together.
+- **Models:** a baseline (always predict the majority class), Logistic Regression, Random Forest and Gradient Boosting (`HistGradientBoostingClassifier`), all with balanced class weights.
+- **Tuning:** a grid of hyperparameters for each model, evaluated on the validation set.
+
+| Model (best tuned version) | Validation F1 | Validation ROC AUC |
+|---|---|---|
+| Logistic Regression | 0.589 | 0.724 |
+| Random Forest | 0.612 | 0.748 |
+| **Gradient Boosting** | **0.625** | **0.762** |
+
+The winning Gradient Boosting model (`learning_rate=0.1`, `max_leaf_nodes=63`, `min_samples_leaf=100`) was retrained on training + validation data and evaluated once on the test set. It is saved as [`models/kickstarter_gradient_boosting.joblib`](models/kickstarter_gradient_boosting.joblib).
+
+We also looked at the **decision threshold**. Raising it from 0.5 to 0.6 increases precision from 0.55 to 0.61 but lowers recall from 0.71 to 0.55. A creator who wants a reliable warning would prefer a higher threshold, while a platform that wants to find promising projects would prefer a lower one.
+
+### 4. Presentation
+
+The findings and recommendations for a non-technical audience are in [**Presentation/**](Presentation/).
+
+## Limitations and Next Steps
+
+- All three algorithms land close together, and even the training F1 only reaches about 0.63. The limit comes from the features, not the model.
+- `goal_vs_category` did not improve the scores, because the model already combines the goal and the category on its own.
+- Strong drivers of success are missing from the data: the campaign text, video, reward tiers and the creator's existing audience. Adding text features from the project description would be a natural next step.
+- The model leans towards predicting success (precision 0.55). The threshold can be adjusted to the use case.
+
+## Repository Structure
 
 | File / Folder | Description |
 |---|---|
-| [**Assignment**](01_assignment.md) | The project brief: timeline, milestones, project options, deliverables, and things to think about. |
-| [**Kanban Board**](02_kanban_board.md) | Step-by-step setup of a GitHub project board to plan and track your work. |
-| [**EDA and Modeling**](03_eda-and-modeling.ipynb) | Worked example of selecting features, doing minimal cleaning, and training a simple model. |
+| [kickstarter_eda_preprocessing.ipynb](kickstarter_eda_preprocessing.ipynb) | EDA, data checks, cleaning and feature engineering. Produces the clean dataset. |
+| [04_Training_the_models_final.ipynb](04_Training_the_models_final.ipynb) | Model comparison, tuning, test evaluation, threshold analysis and feature importance. |
+| [data/](data/) | Raw Kickstarter files and the clean `kickstarter_final.csv`. |
+| [models/](models/) | The trained Gradient Boosting model. |
+| [Presentation/](Presentation/) | Stakeholder presentation slides. |
+| [01_assignment.md](01_assignment.md) | The original project brief. |
+| [02_kanban_board.md](02_kanban_board.md) | Guide for the GitHub project board used to plan the work. |
+| [pyproject.toml](pyproject.toml) / [uv.lock](uv.lock) | Project dependencies. |
 
-### Additional Folders and Files
+## How to Run
 
-| File / Folder | Description |
-|---|---|
-| [**Data**](data/) | Where your datasets go. |
-| [**Models**](models/) | Where trained models are saved. |
-| [**Assets**](assets/) | Screenshots used in the Kanban board guide. |
-| [**pyproject.toml**](pyproject.toml) | Project configuration and dependencies. |
-| [**uv.lock**](uv.lock) | Dependency lock file. |
+1. Install the dependencies (creates a virtual environment in `.venv/`):
 
-## Setup
+   ```bash
+   uv sync
+   ```
 
-> [!NOTE]
-> Throughout these steps, text in angle brackets like `<repo-name>` is a **placeholder**. Replace it, including the `< >` brackets, with your own value. For example, `cd <repo-name>` becomes `cd my-ml-project`.
+2. Open the project in VS Code from the project root and select the `.venv` environment as the notebook kernel:
 
-### 1. Create the Repository from the Template
+   ```bash
+   code .
+   ```
 
-Click **Use this template** on GitHub.
+3. Run the notebooks in order, each with *Restart Kernel → Run All*:
+   1. `kickstarter_eda_preprocessing.ipynb` reads `data/ks-projects-201801.csv` and writes `data/kickstarter_final.csv`. Set `RUN_MODEL_CHECKS = False` in the setup cell for a faster run.
+   2. `04_Training_the_models_final.ipynb` trains, tunes and evaluates the models and saves the final one to `models/`.
 
-When creating the repository:
+### Handling Merge Conflicts in Notebooks
 
-- Set yourself as the **Owner**
-- Choose a repository name
-- Disable **Include all branches**
-- Click **Create repository**
-
-> [!IMPORTANT]
-> If you are working in pairs or groups, only **one person** should complete this step.
-
----
-
-### 2. Add Collaborators (Pairs/Groups Only)
-
-If working with teammates:
-
-1. Open the repository on GitHub
-2. Go to **Settings → Collaborators**
-3. Add your teammates as collaborators
-4. Share the repository link with your team
-
-Teammates should accept the invitation before continuing.
-
----
-
-### 3. Clone the Repository
-
-Copy the SSH URL from the **Code** button on GitHub, then run:
-
-```bash
-git clone <copied-ssh-url>
-```
-
-The copied SSH URL will look like `git@github.com:<your-username>/<repo-name>.git`.
-
----
-
-### 4. Move into the Project Folder and Install Dependencies
-
-This installs all dependencies and creates a virtual environment in (`.venv/`).
-
-```bash
-cd <repo-name>
-uv sync
-```
-
-> [!TIP]
-> This is your own project, so you will add libraries as you go. Install a new package with `uv add <package>` (for example `uv add xgboost`). It updates `pyproject.toml` and `uv.lock` for the whole team.
-
----
-
-### 5. Open the Notebook
-
-> [!NOTE]
-> Make sure you open VS Code from the project root so it automatically detects the environment created by `uv sync`.
-
-Launch VS Code in the project root folder:
-
-```bash
-code .
-```
-
-Then open `03_eda-and-modeling.ipynb` and select the Python environment created by `uv sync` as the kernel.
-
-## Handling Merge Conflicts in Notebooks
-
-When working in a team, `.ipynb` files can cause messy merge conflicts because they are JSON based. The `nbdime` tool makes this easier, and `uvx` runs it without adding it to your project dependencies.
-
-Enable the git integration once:
-
-```bash
-uvx nbdime config-git --enable
-```
-
-When a conflict happens, open the merge tool:
-
-```bash
-uvx nbdime mergetool
-```
-
-A web interface opens showing both notebook versions side by side. Choose what to keep, save, and close the tool, then:
-
-```bash
-git add your_notebook.ipynb
-git commit -m "Resolve notebook conflict"
-```
-
-> [!TIP]
-> When working with notebooks, it's a good idea to clear outputs before committing to reduce the chances of conflicts. You can do this in VS Code with the command palette: `Notebook: Clear All Outputs`.
-
-## References & Further Reading
-
-- [**scikit-learn Documentation**](https://scikit-learn.org/stable/): the library used for modelling, with user guides and examples.
-- [**Choosing the Right Estimator**](https://scikit-learn.org/stable/machine_learning_map.html): a visual map for picking a model based on your problem and data.
-- [**PEP 8 Style Guide for Python Code**](https://peps.python.org/pep-0008/): the style your notebook should follow.
-- [**Jupyter Notebooks in VS Code**](https://code.visualstudio.com/docs/datascience/jupyter-notebooks): how to run notebooks and pick a kernel in VS Code.
-- [**uv Documentation**](https://docs.astral.sh/uv/): the package manager that handles Python and dependencies for this repo.
-- [**Zindi Competitions**](https://zindi.africa/competitions): real-world challenges, several of which are listed as project options in the assignment.
+`.ipynb` files are JSON, so merge conflicts get messy. Enable `nbdime` once with `uvx nbdime config-git --enable`, then resolve conflicts with `uvx nbdime mergetool`. Clearing notebook outputs before committing also reduces conflicts.
